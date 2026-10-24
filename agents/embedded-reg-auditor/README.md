@@ -44,35 +44,16 @@ It is built for embedded firmware engineers, bare-metal developers, reviewers, a
 
 ## Architecture & Data Flow
 
-```
-[Target C/C++ Source File]
-            |
-            v
-+-----------------------+
-|  Input Parser / CLI   |
-+-----------------------+
-            |
-            +------------------------------+
-            |                              |
-    (GEMINI_API_KEY set &          (No API key OR
-      --offline not passed)          --offline flag passed)
-            |                              |
-            v                              v
-+-----------------------+      +-----------------------+
-|  Google GenAI Client  |      |   Local Heuristic     |
-|   (gemini-3.8-flash)  |      |   Pattern Scanner     |
-+-----------------------+      +-----------------------+
-            |                              |
-            +------------+    +------------+
-                         |    |
-                         v    v
-            +---------------------------+
-            | Markdown / JSON Formatter |
-            +---------------------------+
-                         |
-                         v
-            [Audit Report with Summary, ]
-            [Findings Table & Remediation]
+```mermaid
+flowchart TD
+    A[Target C/C++ source] --> B[CLI dispatcher]
+    B -->|No API key or --offline| C[Offline heuristic scanner]
+    B -->|API key configured| D[Primary Gemini model]
+    D -->|Eligible 503, 404, or timeout| E[Fallback Gemini model]
+    D -->|Success| F[Markdown or JSON report]
+    E -->|Success| F
+    E -->|Failure| C
+    C --> F
 ```
 
 ---
@@ -86,32 +67,46 @@ It is built for embedded firmware engineers, bare-metal developers, reviewers, a
 
 ## Installation & Setup
 
-1. **Navigate to the agent directory:**
+Run these commands from the repository root in PowerShell.
+
+1. **Create a virtual environment and install dependencies:**
    ```powershell
-   cd agents/embedded-reg-auditor
+   uv venv agents\embedded-reg-auditor\.venv
+   uv pip install --python agents\embedded-reg-auditor\.venv\Scripts\python.exe -r agents\embedded-reg-auditor\requirements.txt
    ```
 
-2. **Set up a virtual environment (optional but recommended):**
+2. **(Optional) Configure local credentials for LLM mode:**
    ```powershell
-   python -m venv .venv
-   .\.venv\Scripts\Activate.ps1   # On Windows
-   # source .venv/bin/activate    # On Linux/macOS
+   Copy-Item agents\embedded-reg-auditor\.env.example agents\embedded-reg-auditor\.env
+   notepad agents\embedded-reg-auditor\.env
    ```
 
-3. **Install dependencies:**
-   ```powershell
-   python -m pip install -r requirements.txt
-   ```
+   Replace the placeholder in `.env` with your Gemini API key. Keep this file private; `.env` is excluded by the agent's `.gitignore`. Never put a real key in `.env.example` or commit it.
 
-4. **(Optional) Configure environment variables for LLM mode:**
-   ```powershell
-   Copy-Item .env.example .env
-   ```
-   Add your Gemini API key inside `.env`:
-   ```env
-   GEMINI_API_KEY=AIzaSy...
+   ```dotenv
+   GEMINI_API_KEY=your_gemini_api_key_here
    GEMINI_MODEL=gemini-3.8-flash
    ```
+
+The `.venv` Python executable can run the agent and tests without relying on a `python` command being on `PATH`:
+
+```powershell
+agents\embedded-reg-auditor\.venv\Scripts\python.exe agents\embedded-reg-auditor\agent.py --file agents\embedded-reg-auditor\test_samples\stm32_uart.c --offline
+```
+
+Alternatively, `uv run` can select a Python interpreter managed by uv:
+
+```powershell
+uv run --no-project --directory agents\embedded-reg-auditor python agent.py --file test_samples\stm32_uart.c --offline
+```
+
+For live Gemini calls, install the requirements above and configure `.env`:
+
+```powershell
+uv run --no-project --directory agents\embedded-reg-auditor python agent.py --file test_samples\stm32_uart.c
+```
+
+If the primary and fallback requests both fail, the CLI prints advisory messages to stderr and returns an offline report. A timeout can indicate network/proxy restrictions; it does not establish whether the API key is valid.
 
 ---
 
@@ -132,16 +127,16 @@ When `GEMINI_API_KEY` is present in your environment or `.env` file:
 
 ```powershell
 # Run LLM audit using default gemini-3.8-flash
-python agent.py --file test_samples/stm32_uart.c
+uv run --no-project --directory agents\embedded-reg-auditor python agent.py --file test_samples\stm32_uart.c
 
 # Specify a custom model
-python agent.py --file test_samples/stm32_uart.c --model gemini-2.5-pro
+uv run --no-project --directory agents\embedded-reg-auditor python agent.py --file test_samples\stm32_uart.c --model gemini-3.5-flash
 
 # Output structured JSON
-python agent.py --file test_samples/stm32_uart.c --format json
+uv run --no-project --directory agents\embedded-reg-auditor python agent.py --file test_samples\stm32_uart.c --format json
 
 # Save report to a file
-python agent.py --file test_samples/stm32_uart.c --output audit-report.md
+uv run --no-project --directory agents\embedded-reg-auditor python agent.py --file test_samples\stm32_uart.c --output audit-report.md
 ```
 
 ### 2. Offline Fallback Mode (Zero External Calls)
@@ -150,10 +145,10 @@ Force offline heuristic scanning even if an API key is set, or run without an AP
 
 ```powershell
 # Force offline scan
-python agent.py --file test_samples/stm32_uart.c --offline
+uv run --no-project --directory agents\embedded-reg-auditor python agent.py --file test_samples\stm32_uart.c --offline
 
 # Offline JSON report
-python agent.py --file test_samples/stm32_uart.c --offline --format json
+uv run --no-project --directory agents\embedded-reg-auditor python agent.py --file test_samples\stm32_uart.c --offline --format json
 ```
 
 *Exit Codes:* Returns `1` if advisory findings or register hazards were detected; returns `0` if no hazards were found.
@@ -186,14 +181,14 @@ void uart2_init(void) {
 }
 ```
 
-Command:
+Run from the repository root using:
 ```powershell
-python agent.py --file test_samples/stm32_uart.c --offline
+uv run --no-project --directory agents\embedded-reg-auditor python agent.py --file test_samples\stm32_uart.c --offline
 ```
 
 ### Example Output
 
-```markdown
+````markdown
 # Embedded Register Audit
 
 File: `test_samples/stm32_uart.c`
@@ -259,22 +254,22 @@ uart->BRR = UART_BAUD_RATE;
 // 4. Use unsigned constant shifts within type width (avoid signed overflow)
 uart->CR1 |= (1U << 31);
 ```
-```
+````
 
 ---
 
 ## How to Test
 
-Run the automated test suite across all heuristic rules, markdown formatting, JSON output, and CLI invocation:
+Run the current automated unit tests from the repository root:
 
 ```powershell
-python -m unittest discover -s . -v
+uv run --no-project --directory agents\embedded-reg-auditor python -m unittest discover -s . -v
 ```
 
-Execute a manual audit smoke test:
+The committed unit tests cover the heuristic findings and clock-enable check. Run an offline smoke test with:
 
 ```powershell
-python agent.py --file test_samples/stm32_uart.c --offline
+uv run --no-project --directory agents\embedded-reg-auditor python agent.py --file test_samples\stm32_uart.c --offline
 ```
 
 ---
